@@ -1,0 +1,74 @@
+name: Repackage RetroArch Nightly (Switch)
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repackage:
+    runs-on: ubuntu-latest
+
+    env:
+      SOURCE_URL: https://buildbot.libretro.com/nightly/nintendo/switch/libnx/RetroArch.7z
+      EXTRACT_DIR: retroarch-switch
+      OUTPUT_ZIP: RetroArch.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 1: Download the nightly 7z ────────────────────────────
+      - name: Download RetroArch nightly
+        run: |
+          curl -fSL --retry 3 --retry-delay 10 -o RetroArch.7z "$SOURCE_URL"
+          ls -lh RetroArch.7z
+
+      # ── Step 2: Extract with 7z ────────────────────────────────────
+      - name: Extract archive
+        run: |
+          mkdir -p "$EXTRACT_DIR"
+          7z x RetroArch.7z -o"$EXTRACT_DIR" -y
+          echo "── Extracted contents ──"
+          ls -R "$EXTRACT_DIR" | head -60
+
+      # ── Step 3: Repackage as .zip ──────────────────────────────────
+      - name: Compress to ZIP
+        run: |
+          cd "$EXTRACT_DIR"
+          zip -r "../$OUTPUT_ZIP" .
+          cd ..
+          ls -lh "$OUTPUT_ZIP"
+
+      # ── Step 4: Create a dated GitHub Release ──────────────────────
+      - name: Build release tag
+        id: tag
+        run: |
+          TAG="nightly-$(date -u +'%Y-%m-%d')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "name=RetroArch Switch Nightly — $(date -u +'%B %-d, %Y')" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          NAME="${{ steps.tag.outputs.name }}"
+
+          # Delete any existing release with today's tag so the job is
+          # idempotent if it runs more than once in a 24-hour window.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+
+          gh release create "$TAG" \
+            "$OUTPUT_ZIP" \
+            --title "$NAME" \
+            --notes "Automated repackage of the LibRetro buildbot nightly for Nintendo Switch (libnx).
+
+          **Source:** \`$SOURCE_URL\`
+          **Built:** $(date -u +'%Y-%m-%d %H:%M UTC')
+
+          This release simply converts the upstream \`.7z\` archive into a \`.zip\` for easier consumption by SD-card tooling that doesn't support 7z extraction." \
+            --latest
