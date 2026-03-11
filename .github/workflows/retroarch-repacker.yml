@@ -2,7 +2,7 @@ name: Repackage RetroArch Nightly (Switch)
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -21,14 +21,74 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ── Pre-flight: smart polling ─────────────────────────────────
+      #    Fetch the upstream Last-Modified header and compare it to
+      #    the created date of our most recent GitHub Release. If
+      #    upstream hasn't changed, bail early and save compute.
+      - name: Check for updates
+        id: freshness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # ── 1. Get upstream Last-Modified as epoch seconds ────────
+          HEADERS=$(curl -fsSI --retry 3 --retry-delay 5 "$SOURCE_URL")
+          echo "── Upstream response headers ──"
+          echo "$HEADERS" | grep -iE "^(last-modified|content-length):"
+
+          UPSTREAM_DATE=$(echo "$HEADERS" \
+            | grep -i '^last-modified:' \
+            | sed 's/^[Ll]ast-[Mm]odified: *//' \
+            | tr -d '\r')
+
+          if [[ -z "$UPSTREAM_DATE" ]]; then
+            echo "::warning::No Last-Modified header found — proceeding with build."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          UPSTREAM_EPOCH=$(date -d "$UPSTREAM_DATE" +%s 2>/dev/null || echo "0")
+          echo "Upstream Last-Modified : $UPSTREAM_DATE (epoch: $UPSTREAM_EPOCH)"
+
+          # ── 2. Get our latest release created date as epoch ───────
+          RELEASE_DATE=$(gh release view --json createdAt --jq '.createdAt' 2>/dev/null || echo "")
+
+          if [[ -z "$RELEASE_DATE" ]]; then
+            echo "No existing release found — proceeding with initial build."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RELEASE_EPOCH=$(date -d "$RELEASE_DATE" +%s 2>/dev/null || echo "0")
+          echo "Latest release created : $RELEASE_DATE (epoch: $RELEASE_EPOCH)"
+
+          # ── 3. Compare timestamps ────────────────────────────────
+          if [[ "$UPSTREAM_EPOCH" -gt "$RELEASE_EPOCH" ]]; then
+            echo "✅ Upstream is newer — proceeding with build."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "⏭️  Upstream has not changed since last release — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bail if up-to-date
+        if: steps.freshness.outputs.skip == 'true'
+        run: |
+          echo "Nothing to do. Upstream file has not been modified since the last release."
+          echo "Exiting cleanly."
+          exit 0
+
       # ── Step 1: Download the nightly 7z ────────────────────────────
       - name: Download RetroArch nightly
+        if: steps.freshness.outputs.skip != 'true'
         run: |
           curl -fSL --retry 3 --retry-delay 10 -o RetroArch.7z "$SOURCE_URL"
           ls -lh RetroArch.7z
 
       # ── Step 2: Extract with 7z ────────────────────────────────────
       - name: Extract archive
+        if: steps.freshness.outputs.skip != 'true'
         run: |
           mkdir -p "$EXTRACT_DIR"
           7z x RetroArch.7z -o"$EXTRACT_DIR" -y
@@ -37,6 +97,7 @@ jobs:
 
       # ── Step 3: Repackage as .zip ──────────────────────────────────
       - name: Compress to ZIP
+        if: steps.freshness.outputs.skip != 'true'
         run: |
           cd "$EXTRACT_DIR"
           zip -r "../$OUTPUT_ZIP" .
@@ -45,13 +106,15 @@ jobs:
 
       # ── Step 4: Create a dated GitHub Release ──────────────────────
       - name: Build release tag
+        if: steps.freshness.outputs.skip != 'true'
         id: tag
         run: |
-          TAG="nightly-$(date -u +'%Y-%m-%d')"
+          TAG="nightly-$(date -u +'%Y-%m-%d-%H%M')"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "name=RetroArch Switch Nightly — $(date -u +'%B %-d, %Y')" >> "$GITHUB_OUTPUT"
+          echo "name=RetroArch Switch Nightly — $(date -u +'%B %-d, %Y %H:%M UTC')" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        if: steps.freshness.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
